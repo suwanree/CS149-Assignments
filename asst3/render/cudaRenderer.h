@@ -19,6 +19,11 @@ class CudaRenderer : public CircleRenderer {
   float* cudaDeviceColor;
   float* cudaDeviceRadius;
   float* cudaDeviceImageData;
+  
+
+  // tile 내부에 있는 circle index 저장
+  int** cudaDeviceCirclesInTile;
+  int*  cudaDeviceCirclesInTileCount;
 
  public:
   CudaRenderer();

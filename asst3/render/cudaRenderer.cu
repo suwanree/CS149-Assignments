@@ -31,6 +31,9 @@ struct GlobalConstants {
     int imageWidth;
     int imageHeight;
     float* imageData;
+
+    int** circlesInTile;
+    int*  circlesInTileCount;
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -384,11 +387,14 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
 // Each thread renders a circle.  Since there is no protection to
 // ensure order of update or mutual exclusion on the output image, the
 // resulting image will be incorrect.
-__global__ void kernelRenderCircles() {
+__global__ void kernelRenderCircles(int* circleList) {
 
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (index >= cuConstRendererParams.numCircles)
+
+
+    if (imageX >= cuConstRendererParams.imageWidth || imageY >= cuConstRendererParams.imageHeight)
         return;
 
     int index3 = 3 * index;
@@ -427,6 +433,118 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+
+__global__ void kernelGetCirclesInTile() {
+    int tileX = blockIdx.x;
+    int tileY = blockIdx.y;
+
+    int pixelX = threadIdx.x % 16 + tileX * 16;
+    int pixelY = threadIdx.y / 16 + tileY * 16;
+
+    int pixelIndex = pixelY * cuConstRendererParams.imageWidth + pixelX;
+
+    int tileIndex = tileY * gridDim.x + tileX;
+
+    int tileWidth = cuConstRendererParams.imageWidth / gridDim.x;
+    int tileHeight = cuConstRendererParams.imageHeight / gridDim.y;
+
+    int invWidth = 1.0f / cuConstRendererParams.imageWidth;
+    int invHeight = 1.0f / cuConstRendererParams.imageHeight;
+
+    float boxL = tileX * tileWidth * invWidth;
+    float boxT = tileY * tileHeight * invHeight;
+    float boxR = (tileX + 1) * tileWidth * invWidth;
+    float boxB = (tileY + 1) * tileHeight * invHeight;
+
+    int numCircles = cuConstRendererParams.numCircles;
+
+    __shared__ int inTileStatus[256];
+    __shared__ int inTileStatusExScan[256];
+    __shared__ int inTileCircleIndex[256];
+    __shared__ int sScratch[512];
+
+    int tileNumCircles = 0;
+    float4 newColor = *(float4*)cuConstRendererParams.imageData[4 * pixelIndex];
+    float2 pixelCenterNorm = make_float2(
+                    invWidth * (static_cast<float>(pixelX) + 0.5f),
+                    invHeight * (static_cast<float>(pixelY) + 0.5f));
+
+
+    for (int index = threadIdx.x; index < numCircles; index += 256) {
+        int index3 = 3 * index;
+        float3 p = *(float3 *)(&cuConstRendererParams.position[index3]);
+        float  rad = cuConstRendererParams.radius[index];
+
+        inTileStatus[threadIdx.x] = circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB);
+        __syncthreads();
+
+
+        sharedMemExclusiveScan(threadIdx.x, inTileStatus, inTileStatusExScan, sScratch, 256);
+
+        if (inTileStatus[threadIdx.x]) {
+            inTileCircleIndex[inTileStatusExScan[threadIdx.x]] = index;
+        }
+        if (threadIdx.x == 255) {
+            tileNumCircles = inTileStatusExScan[255] + inTileStatus[255];
+        }
+        inTileStatus[threadIdx.x] = 0;
+        __syncthreads();
+
+
+        // step 2 : pixel마다 모든 원 렌더
+        for (int i = 0; i<tileNumCircles; i++) {
+
+            int circleIndex = inTileCircleIndex[i];
+            float3 circleCenter = *(float3 *)(&cuConstRendererParams.position[circleIndex]);
+
+            shadePixel(circleIndex, pixelCenterNorm, circleCenter, &newColor);
+        }
+    }
+
+    cuConstRendererParams.imageData[4 * pixelIndex] = newColor;
+
+}
+
+
+// 1 thread == 1 pixel
+__global__ void kernelRenderTiles(int** circlesInTile, int* circleInTileCount, int tileCount) {
+    int pixelX = blockDim.x * blockIdx.x + threadIdx.x;
+    int pixelY = blockDim.y * blockIdx.y + threadIdx.y;
+
+    int pixelIndex = pixelY * cuConstRendererParams.imageWidth + pixelX;
+
+    int tileX = pixelX / blockDim.x;
+    int tileY = pixelY / blockDim.y;
+
+    int tileCountX = tileCount / 2;
+    
+    int tileIndex = tileY * tileCountX + tileX;
+
+    int circleCount = circleInTileCount[tileIndex];
+
+    // float invWidth = 1.0f / cuConstRendererParams.imageWidth;
+    // float invHeight = 1.0f / cuConstRendererParams.imageHeight;
+
+    // float boxL = static_cast<float>(pixelX) * invWidth;
+    // float boxR = static_cast<float>(pixelX+1) * invWidth;
+    // float boxT = static_cast<float>(pixelY) * invHeight;
+    // float boxB = static_cast<float>(pixelY+1) * invHeight;
+
+    float4 newColor = *(float4*)cuConstRendererParams.imageData[4 * pixelIndex];
+
+    float2 pixelCenterNorm = make_float2(
+            invWidth * (static_cast<float>(pixelX) + 0.5f),
+            invHeight * (static_cast<float>(pixelY) + 0.5f));
+
+    for (int circle = 0; circle < circleCount; circle++) {
+
+        int circleIndex = circlesInTile[tileIndex][circle];
+        float3 circleCenter = *(float3*)(&cuConstRendererParams.position[3 * circleIndex]);
+
+        shadePixel(circleIndex, pixelCenterNorm, circleCenter, &newColor);
+    }
+
+}
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -525,11 +643,23 @@ CudaRenderer::setup() {
     cudaMalloc(&cudaDeviceColor, sizeof(float) * 3 * numCircles);
     cudaMalloc(&cudaDeviceRadius, sizeof(float) * numCircles);
     cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image->width * image->height);
+    
+    // tile별 circle index 저장
+    int tileCountX = (image->width + 15) / 16;
+    int tileCountY = (image->height + 15) / 16;
+    cudaMalloc(&cudaDeviceCirclesInTile, sizeof(int) * tileCountX * tileCountY * numCircles);
+    cudaMalloc(&cudaDeviceCirclesInTileCount, sizeof(short) * tileCountX * tileCountY);
+    //
+
+
 
     cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
     cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
     cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
     cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numCircles, cudaMemcpyHostToDevice);
+
+
+
 
     // Initialize parameters in constant memory.  We didn't talk about
     // constant memory in class, but the use of read-only constant
@@ -549,6 +679,12 @@ CudaRenderer::setup() {
     params.color = cudaDeviceColor;
     params.radius = cudaDeviceRadius;
     params.imageData = cudaDeviceImageData;
+
+    // tile별 circle index 저장
+    params.circlesInTile = cudaDeviceCirclesInTile;
+    params.circlesInTileCount = cudaDeviceCirclesInTileCount;
+    //
+
 
     cudaMemcpyToSymbol(cuConstRendererParams, &params, sizeof(GlobalConstants));
 
@@ -637,9 +773,12 @@ void
 CudaRenderer::render() {
 
     // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+    dim3 blockDim(16, 16, 1);
+    dim3 gridDim(
+        (image->Width + blockDim.x - 1) / blockDim.x, 
+        (image->Height + blockDim.y - 1) / blockDim.y        
+    );
 
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+    kernerGetCirclesInTile<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }

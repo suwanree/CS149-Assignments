@@ -237,6 +237,39 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
 // indices `i` for which `device_input[i] == device_input[i+1]`.
 //
 // Returns the total number of pairs found
+
+__global__ void duplicate(int* device_input, int length, int* onehotvector){
+
+    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (globalIdx < length) {
+
+        if (globalIdx + 1 < length) {
+            onehotvector[globalIdx] = device_input[globalIdx] == device_input[globalIdx + 1] ? 1 : 0;
+        }
+        else {
+            onehotvector[globalIdx] = 0;
+        }
+    }
+}
+
+__global__ void assignment(int* device_input, int* onehotvector, int length, int* device_output){
+
+    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (globalIdx + 1 < length) {
+
+        if (onehotvector[globalIdx] != onehotvector[globalIdx+1]) {
+            device_output[onehotvector[globalIdx]] = globalIdx;
+        }
+
+    }
+}
+
+
+// step 1 : bool vector를 병렬로 생성
+// step 2 : exclusive scan 구함
+// step 3 : output index = exscan[index], output value = index
 int find_repeats(int* device_input, int length, int* device_output) {
 
     // CS149 TODO:
@@ -251,7 +284,27 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
 
-    return 0; 
+
+    int* onehotvector = nullptr;
+
+    cudaMalloc(&onehotvector, length*sizeof(int));
+
+
+    int blockNum = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+    duplicate<<<blockNum, THREADS_PER_BLOCK>>>(device_input, length, onehotvector);
+
+    exclusive_scan(onehotvector, length, onehotvector);
+
+    assignment<<<blockNum, THREADS_PER_BLOCK>>>(device_input, onehotvector, length, device_output);
+    
+    int result;
+
+    cudaMemcpy(&result, onehotvector + length - 1, sizeof(int), cudaMemcpyDeviceToHost);
+
+    cudaFree(onehotvector);
+
+    return result; 
 }
 
 
