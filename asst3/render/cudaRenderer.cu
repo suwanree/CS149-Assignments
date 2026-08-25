@@ -516,7 +516,7 @@ __global__ void kernelGetTileRange(uint64_t* keys, int n, int* tileStart, int* t
 
 // VRAM에 MALLOC한 상태
 // 원별 타일 인덱스 구하기
-__global__ void kernelInitTilesForCircle() {
+__global__ void kernelInitTilesForCircle(uint64_t* tileIndicesForCircle) {
     int manageCircleIndex = blockIdx.x * blockDim.x + threadIdx.x;
 
     float3 pos;
@@ -550,7 +550,7 @@ __global__ void kernelInitTilesForCircle() {
             for (int tileX = screenMinY/16; tileX < screenMaxX/16; tileX++) {
                 int tileIndex = tileY * 64 + tileX;
 
-                cuConstRendererParams.tileIndicesForCircle[cuConstRendererParams.tileCountForCircle[manageCircleIndex] + i] = ((uint64_t)tileIndex << 52) | ((uint64_t)manageCircleIndex);
+                tileIndicesForCircle[cuConstRendererParams.tileCountForCircle[manageCircleIndex] + i] = ((uint64_t)tileIndex << 52) | ((uint64_t)manageCircleIndex);
                 i++;
             }
         }
@@ -749,6 +749,17 @@ CudaRenderer::CudaRenderer() {
     cudaDeviceColor = NULL;
     cudaDeviceRadius = NULL;
     cudaDeviceImageData = NULL;
+
+    cudaDeviceTileCountForCircle = NULL;
+    cudaDeviceTileCountForCircleExScan = NULL;
+    cudaDeviceTileIndicesForCircle = NULL;
+    cudaDeviceTileStart = NULL;
+    cudaDeviceTileEnd = NULL;
+  
+    tileIndicesForCircle = NULL;
+    
+    tileCounts = NULL;
+    mallocedPair = 0;
 }
 
 CudaRenderer::~CudaRenderer() {
@@ -770,6 +781,16 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(cudaDeviceColor);
         cudaFree(cudaDeviceRadius);
         cudaFree(cudaDeviceImageData);
+
+        cudaFree(cudaDeviceTileCountForCircle);
+        cudaFree(cudaDeviceTileCountForCircleExScan);
+        cudaFree(cudaDeviceTileIndicesForCircle);
+        cudaFree(cudaDeviceTileStart);
+        cudaFree(cudaDeviceTileEnd);
+
+        cudaFree(tileIndicesForCircle);
+        cudaFree(tileCounts);
+
     }
 }
 
@@ -834,7 +855,8 @@ CudaRenderer::setup() {
 
     cudaMalloc(&cudaDeviceTileCountForCircle, sizeof(int) * numCircles);
     cudaMalloc(&cudaDeviceTileCountForCircleExScan, sizeof(int) * numCircles);
-    cudaMalloc(&cudaDeviceTileStart, sizeof(int) * numCircles);cudaMalloc(&cudaDeviceTileEnd, sizeof(int) * numCircles);
+    cudaMalloc(&cudaDeviceTileStart, sizeof(int) * numCircles);
+    cudaMalloc(&cudaDeviceTileEnd, sizeof(int) * numCircles);
 
 
 
@@ -865,11 +887,10 @@ CudaRenderer::setup() {
     params.radius = cudaDeviceRadius;
     params.imageData = cudaDeviceImageData;
     
-
-    params.tileCounts = new int[2];
-    params.mallocedPair = 0;
     params.tileStart = cudaDeviceTileStart;
     params.tileEnd = cudaDeviceTileEnd;
+    params.tileCountForCircle = cudaDeviceTileCountForCircle;
+    params.tileCountForCircleExScan = cudaDeviceTileCountForCircleExScan;
 
     // // tile별 circle index 저장
     // params.circlesInTile = cudaDeviceCirclesInTile;
@@ -990,22 +1011,22 @@ CudaRenderer::render() {
         cudaMalloc(&cudaDeviceTileIndicesForCircle, sizeof(uint64_t) * mallocedPair);
     }
 
-    kernelInitTilesForCircle<<<circleGrid, circleBlock>>>();
+    kernelInitTilesForCircle<<<circleGrid, circleBlock>>>(tileIndicesForCircle);
     cudaDeviceSynchronize();
 
     thrust::sort(thrust::device, cudaDeviceTileIndicesForCircle, cudaDeviceTileIndicesForCircle + allCountPair);
 
 
-    cudaMemset(&cuConstRendererParams.tileStart, 0, sizeof(int)*4096);
-    cudaMemset(&cuConstRendererParams.tileEnd, 0, sizeof(int)*4096);
-    kernelGetTileRange<<<circleGrid, circleBlock>>>(cudaDeviceTileIndicesForCircle, allCountPair, cuConstRendererParams.tileStart, cuConstRendererParams.tileEnd);
+    cudaMemset(&cudaDeviceTileStart, 0, sizeof(int)*4096);
+    cudaMemset(&cudaDeviceTileEnd, 0, sizeof(int)*4096);
+    kernelGetTileRange<<<circleGrid, circleBlock>>>(cudaDeviceTileIndicesForCircle, allCountPair, cudaDeviceTileStart, cudaDeviceTileEnd);
 
     dim3 tileBlock(16, 16, 1);
     dim3 tileGrid(
         (image->width + tileBlock.x - 1) / tileBlock.x,
         (image->height + tileBlock.y - 1) / tileBlock.y);
     
-    kernelRenderTiles<<<tileGrid, tileBlock>>>(cuConstRendererParams.tileStart, cuConstRendererParams.tileEnd);
+    kernelRenderTiles<<<tileGrid, tileBlock>>>(cudaDeviceTileStart, cudaDeviceTileEnd);
 
     cudaDeviceSynchronize();
     

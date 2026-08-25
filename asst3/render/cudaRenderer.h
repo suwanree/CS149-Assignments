@@ -27,6 +27,8 @@ class CudaRenderer : public CircleRenderer {
   int* cudaDeviceTileStart;
   int* cudaDeviceTileEnd;
 
+  uint64_t* tileIndicesForCircle;
+  
   int* tileCounts;
   int mallocedPair;
 
