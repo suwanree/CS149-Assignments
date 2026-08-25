@@ -78,27 +78,24 @@ def check_correctness(render_cmd, scene):
 
 # Run a renderer one time and get the time taken
 def get_time(render_cmd, scene):
-    # print("get_time %s %s" % (render_cmd, scene))
     cmd_string = (
         "./%s -r cuda -b 0:4 %s -s 1024 -f logs/output | tee %s | grep Total:"
-        % (
-            render_cmd,
-            scene,
-            time_log_file(scene),
-        )
+        % (render_cmd, scene, time_log_file(scene))
     )
 
-    # Actually run the renderer
     if os.environ.get("GRADING_TOKEN"):
-        result = subprocess.run(
-            [cmd_string], shell=True, capture_output=True, user="nobody", env={}
-        )
+        result = subprocess.run([cmd_string], shell=True, capture_output=True, user="nobody", env={})
     else:
         result = subprocess.run([cmd_string], shell=True, capture_output=True)
 
-    # Extract the time taken
-    time = float(re.search(r"\d+\.\d+", str(result.stdout)).group())
-    return time
+    raw_str = str(result.stdout)
+    match = re.search(r"\d+\.\d+", raw_str)
+    
+    # 매칭되는 숫자가 없을 경우(None) 에러 방지
+    if match:
+        return float(match.group())
+    else:
+        return 0.0
 
 
 #### END OF RUNNING THE RENDERERS ####
