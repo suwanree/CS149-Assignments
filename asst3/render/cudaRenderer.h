@@ -23,6 +23,7 @@ class CudaRenderer : public CircleRenderer {
   int* cudaDeviceTileCountForCircle;
   int* cudaDeviceTileCountForCircleExScan;
   uint64_t* cudaDeviceTileIndicesForCircle;
+  int2* cudaDeviceTileRange;
 
 
  public:
