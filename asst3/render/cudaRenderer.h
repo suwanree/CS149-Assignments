@@ -2,7 +2,6 @@
 #define __CUDA_RENDERER_H__
 
 #include "circleRenderer.h"
-#include <vector_types.h>
 
 class CudaRenderer : public CircleRenderer {
  private:
@@ -27,8 +26,6 @@ class CudaRenderer : public CircleRenderer {
   int* cudaDeviceTileStart;
   int* cudaDeviceTileEnd;
 
-  uint64_t* tileIndicesForCircle;
-  
   int* tileCounts;
   int mallocedPair;
 
